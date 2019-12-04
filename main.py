@@ -15,27 +15,12 @@ import requests.exceptions
 import lxml
 import re
 from product import Product
+from models import store as store_to_db
 import csv
 
-def json_format_init():
-    return {
-        "list": [
-            {
-            "id": 0,
-            "brand": "",
-            "category": "",
-            "description": "",
-            "link": "",
-            "name": "",
-            "picture": "",
-            "price": 0,
-            "provider_id": "",
-            "reg_price": 0,
-            "seller_id": ""
-            }
-        ]
-    }
-
+####################
+# for testing
+####################
 def save_products_to_csv_file(products, file_name):
     with open(file_name, 'w') as csvfile:
         fieldnames = ['name', 'brand', 'price']
@@ -54,25 +39,93 @@ def save_products_to_csv_file(products, file_name):
 ####################
 def get_visible_text(elem):
     result = re.sub('<!--.*-->|\r|\n', '', str(elem), flags=re.DOTALL)
-    result = re.sub('\s{2,}|&nbsp;', ' ', result)
+    result = re.sub('\s{2,}|&nbsp;', '', result)
     return result
+
+####################
+# joins urls
+####################
+def join_urls(products):
+    base_url = 'https://www.marshalls.com'
+    for item in products:
+        if item['link'] != '#' and item['link'].strip() != '':
+            final_url = base_url + item['link']
+            item['link'] = final_url
+    return products
 
 ####################
 # gets info from passed page
 ####################
 def pull_info(driver):
-    parse_only = SoupStrainer(class_='equal-height-row')
-    soup = BeautifulSoup(driver.page_source, "lxml", parse_only=parse_only)
-    pattern = "[^-\\s]"
+    parse_only = SoupStrainer('div', {'class': "equal-height-row"})
+    # wait = WebDriverWait(driver, 10)
+    # wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'product-inner')))
+    soup = BeautifulSoup(driver.page_source, "lxml")
+    # pattern = "[^-\\s]"
+    # soup2 = BeautifulSoup.prettify(soup)
+    # print(soup2)
+    categories = []
+    for el in soup.select_one(".breadcrumbs-container").find_all("li"):
+        if el.find("a") is not None:
+            if el.find("a").get_text() == "Clearance":
+                continue
+            categories.append(el.find("a").get_text())
+        else:
+            categories.append(el.get_text())
 
-    return [
-        {
-            'name': row.select_one(".product-title").get_text(),
-            'brand': row.select_one(".product-brand").get_text(),
-            'price': get_visible_text(row.select_one(".price-comparison").previous_element.previous_element.previous_element)
-        }
-        for row in soup.select(".product-details")
-    ]
+    prods = []
+    for row in soup.find_all("div", {"class": "product-inner"}):
+        try:
+            # print(row)
+            prods.extend([
+                {
+                    'link': row.select_one(".product-link").get("href"),
+                    'name': row.select_one(".product-title").get_text(),
+                    'picture': row.select_one(".product-link").find("img", recursive=False).get("src"),
+                    'brand': row.select_one(".product-brand").get_text(),
+                    'price': get_visible_text(row.select_one(".price-comparison").previous_element.previous_element.previous_element),
+                    'reg_price': row.select_one(".original-price").next_element.next_element.next_element,
+                    'provider_id': '',
+                    'description': '',
+                    'seller_id': 'marshalls.com',
+                    'category': str(categories)
+                }
+                # for row in soup.select(".product-details")
+            ])
+        except AttributeError:
+            print(AttributeError)
+    return prods
+
+####################
+# goes through all subcategories on sub pages
+####################
+def sub_tabs(driver):
+    preprocess = []
+    cat_list = driver.find_element_by_xpath('//ul[@class="category-list"]')
+    count = 0
+    for link in cat_list.find_elements_by_tag_name('a'):
+        ##################
+        # saves main window, opens new one from link
+        ##################
+        new_tab = link.get_attribute('href')
+        driver.execute_script("window.open('');")
+        driver.switch_to.window(driver.window_handles[2])
+        driver.get(new_tab)
+        print("Current Page Title is : %s" %driver.title)
+        ##################
+        # calls function to store info from page
+        ##################
+        preprocess.extend(pull_info(driver))
+        ##################
+        # closes window and goes back to source page
+        ##################
+        driver.close()
+        driver.switch_to.window(driver.window_handles[1])
+        print("Current Page Title is : %s" %driver.title)
+        count += 1
+        if count > 0:
+            break
+    return preprocess
 
 ####################
 # goes through all category links on main page
@@ -97,10 +150,10 @@ def marshalls_parser(driver):
     products = []
     count = 0
     for elem in driver.find_elements_by_xpath('//*[@id="usmm-dd-cat3620196p"]/div[1]/div'):
-        if count > 1:
+        if count > 0:
             break
-        for el in elem.find_elements_by_class_name('sub-menu'):
-            if count > 1:
+        for el in elem.find_elements_by_xpath('.//ul/li'):
+            if count > 0:
                 break
             for link in el.find_elements_by_tag_name('a'):
                 ##################
@@ -114,22 +167,26 @@ def marshalls_parser(driver):
                 ##################
                 # calls function to store info from page
                 ##################
-                products.extend(pull_info(driver))
+                products.extend(sub_tabs(driver))
                 ##################
                 # closes window and goes back to source page
                 ##################
                 driver.close()
                 driver.switch_to.window(driver.window_handles[0])
                 print("Current Page Title is : %s" %driver.title)
+                ##################
+                # adds categories to list
+                ##################
                 count += 1
-                if count > 1:
+                if count > 0:
                     break
+    driver.close()
 
-    #for item in data['list']:
-    #    print(item)
-    #save_products_to_csv_file(products, "product_list.csv")
-    for i in products:
-        print(i)
+    products = join_urls(products)
+    store_to_db(products)
+
+    # for i in products:
+    #    print(i)
 
 if __name__ == '__main__':
     ##################
@@ -146,5 +203,3 @@ if __name__ == '__main__':
     #data = pull_info(browser)
 
     #print(data)
-
-#results = soup.find_all('span', id='product-brand-4000003579')
